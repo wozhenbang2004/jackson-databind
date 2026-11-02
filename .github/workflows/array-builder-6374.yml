@@ -17,6 +17,22 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: FasterXML/jackson-bom
+          ref: 1340e15744a0e5293f61bdb351a11eba83b468b3
+          path: .validation-deps/jackson-bom
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: FasterXML/jackson-core
+          ref: 7e5558031f4644c5efe48d71fba7080633f2460b
+          path: .validation-deps/jackson-core
+          persist-credentials: false
+      - name: Build matching official 3.0 snapshot dependencies
+        run: |
+          ./mvnw -B -ntp -f .validation-deps/jackson-bom/pom.xml install -DskipTests
+          ./mvnw -B -ntp -f .validation-deps/jackson-core/pom.xml install -DskipTests
       - name: Verify regression fails on the baseline
         shell: bash
         run: |
