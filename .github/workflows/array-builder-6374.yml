@@ -17,6 +17,121 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
+      - name: Add concrete-parent round-trip regression
+        shell: bash
+        run: |
+          cat > src/test/java/tools/jackson/databind/jsontype/SealedInheritedTypeName6093Test.java <<'JAVATEST'
+          package tools.jackson.databind.jsontype;
+          
+          import org.junit.jupiter.api.Test;
+          
+          import com.fasterxml.jackson.annotation.JsonCreator;
+          import com.fasterxml.jackson.annotation.JsonProperty;
+          import com.fasterxml.jackson.annotation.JsonSubTypes;
+          import com.fasterxml.jackson.annotation.JsonTypeInfo;
+          import com.fasterxml.jackson.annotation.JsonTypeName;
+          
+          import tools.jackson.databind.ObjectMapper;
+          import tools.jackson.databind.json.JsonMapper;
+          
+          import static org.junit.jupiter.api.Assertions.assertEquals;
+          
+          class SealedInheritedTypeName6093Test {
+              @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
+              @JsonSubTypes(@JsonSubTypes.Type(Action.class))
+              sealed interface Settings permits Action { }
+          
+              @JsonTypeName("action")
+              sealed interface Action extends Settings permits OpenWindow, ExplicitAction {
+                  @JsonProperty("actionName")
+                  String actionName();
+          
+                  @JsonCreator
+                  static Action create(@JsonProperty("actionName") String name) {
+                      return new OpenWindow(name);
+                  }
+              }
+          
+              record OpenWindow(String actionName) implements Action { }
+          
+              @JsonTypeName("explicit")
+              record ExplicitAction(String actionName) implements Action { }
+          
+              record Document(Settings settings) { }
+          
+              private final ObjectMapper mapper = JsonMapper.builder().build();
+          
+              @Test
+              void typedWriterUsesInheritedName() {
+                  String json = mapper.writerFor(Settings.class).writeValueAsString(new OpenWindow("example"));
+                  assertEquals("action", mapper.readTree(json).get("type").asString());
+                  assertEquals(new OpenWindow("example"), mapper.readValue(json, Settings.class));
+              }
+          
+              @Test
+              void propertyUsesInheritedName() {
+                  String json = mapper.writeValueAsString(new Document(new OpenWindow("example")));
+                  assertEquals("action", mapper.readTree(json).get("settings").get("type").asString());
+                  assertEquals(new Document(new OpenWindow("example")), mapper.readValue(json, Document.class));
+              }
+          
+              @Test
+              void dynamicWriterStillUsesInheritedName() {
+                  String json = mapper.writeValueAsString(new OpenWindow("example"));
+                  assertEquals("action", mapper.readTree(json).get("type").asString());
+              }
+          
+              @Test
+              void directTypeNameTakesPrecedence() {
+                  String json = mapper.writerFor(Settings.class).writeValueAsString(new ExplicitAction("example"));
+                  assertEquals("explicit", mapper.readTree(json).get("type").asString());
+                  assertEquals(new ExplicitAction("example"), mapper.readValue(json, Settings.class));
+              }
+              @JsonTypeInfo(use = JsonTypeInfo.Id.SIMPLE_NAME, property = "type")
+              abstract static class SimpleNameMixin { }
+          
+              @Test
+              void simpleNameWriterUsesInheritedName() {
+                  ObjectMapper simple = JsonMapper.builder().addMixIn(Settings.class, SimpleNameMixin.class).build();
+                  String json = simple.writerFor(Settings.class).writeValueAsString(new OpenWindow("example"));
+                  assertEquals("action", simple.readTree(json).get("type").asString());
+              }
+          
+              @Test
+              void simpleNameWriterRetainsDirectName() {
+                  ObjectMapper simple = JsonMapper.builder().addMixIn(Settings.class, SimpleNameMixin.class).build();
+                  String json = simple.writerFor(Settings.class).writeValueAsString(new ExplicitAction("example"));
+                  assertEquals("explicit", simple.readTree(json).get("type").asString());
+              }
+          
+          
+              @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
+              @JsonSubTypes({@JsonSubTypes.Type(Dog.class), @JsonSubTypes.Type(Beagle.class)})
+              abstract static class Animal { }
+          
+              @JsonTypeName("dog")
+              static class Dog extends Animal {
+                  public String name = "sample";
+              }
+          
+              static class Beagle extends Dog { }
+          
+              @Test
+              void concreteParentNameDoesNotReplaceListedSubtypeName() {
+                  String json = mapper.writerFor(Animal.class).writeValueAsString(new Beagle());
+                  assertEquals("SealedInheritedTypeName6093Test$Beagle", mapper.readTree(json).get("type").asString());
+                  assertEquals(Beagle.class, mapper.readValue(json, Animal.class).getClass());
+              }
+          
+              @Test
+              void simpleConcreteParentNameDoesNotReplaceListedSubtypeName() {
+                  ObjectMapper simple = JsonMapper.builder().addMixIn(Animal.class, SimpleNameMixin.class).build();
+                  String json = simple.writerFor(Animal.class).writeValueAsString(new Beagle());
+                  assertEquals("Beagle", simple.readTree(json).get("type").asString());
+                  assertEquals(Beagle.class, simple.readValue(json, Animal.class).getClass());
+              }
+          }
+          JAVATEST
       - name: Verify reported serialization mismatch
         shell: bash
         run: |
@@ -29,7 +144,7 @@ jobs:
           python3 - <<'PYTEST'
           import xml.etree.ElementTree as ET
           suite = ET.parse('target/surefire-reports/TEST-tools.jackson.databind.jsontype.SealedInheritedTypeName6093Test.xml').getroot()
-          assert int(suite.attrib['tests']) == 6, suite.attrib
+          assert int(suite.attrib['tests']) == 8, suite.attrib
           assert int(suite.attrib['failures']) == 3, suite.attrib
           assert int(suite.attrib['errors']) == 0, suite.attrib
           print('Confirmed inherited name mismatches; dynamic and explicit-name controls pass')
@@ -51,4 +166,33 @@ jobs:
               assert source.count(before) == 1
               path.write_text(source.replace(before, after))
           PYFIX
+          set +e
+          ./mvnw -B -ntp test -Dtest=SealedInheritedTypeName6093Test > submitted.log 2>&1
+          result=$?
+          set -e
+          cat submitted.log
+          test "$result" -ne 0
+          python3 - <<'PYREVIEW'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse('target/surefire-reports/TEST-tools.jackson.databind.jsontype.SealedInheritedTypeName6093Test.xml').getroot()
+          assert int(suite.attrib['tests']) == 8, suite.attrib
+          assert int(suite.attrib['failures']) == 2, suite.attrib
+          assert int(suite.attrib['errors']) == 0, suite.attrib
+          print('Confirmed concrete-parent regressions in submitted patch')
+          PYREVIEW
+      - name: Preserve registered concrete subtype IDs and verify related suite
+        shell: bash
+        run: |
+          python3 - <<'PYREVISION'
+          from pathlib import Path
+          before = '                // Resolve unnamed types lazily so inherited @JsonTypeName annotations\n                // are considered, just as they are for types not listed as subtypes.\n                if (forSer && t.hasName()) {\n                    typeToId.put(cls.getName(), id);\n                }\n'
+          after = "                if (forSer) {\n                    // Do not inherit a registered concrete parent's name: the\n                    // deserializer must still distinguish it from this subtype.\n                    boolean useDefault = t.hasName();\n                    if (!useDefault) {\n                        for (NamedType parent : subtypes) {\n                            if (parent.hasName() && ClassUtil.isConcrete(parent.getType())\n                                    && parent.getType().isAssignableFrom(cls)) {\n                                useDefault = true;\n                                break;\n                            }\n                        }\n                    }\n                    if (useDefault) {\n                        typeToId.put(cls.getName(), id);\n                    }\n                }\n"
+          for name in ('TypeNameIdResolver', 'SimpleNameIdResolver'):
+              path = Path('src/main/java/tools/jackson/databind/jsontype/impl/' + name + '.java')
+              source = path.read_text()
+              assert source.count(before) == 1
+              source = source.replace(before, after)
+              source = source.replace('import tools.jackson.databind.jsontype.NamedType;', 'import tools.jackson.databind.jsontype.NamedType;\nimport tools.jackson.databind.util.ClassUtil;')
+              path.write_text(source)
+          PYREVISION
           ./mvnw -B -ntp test '-Dtest=SealedInheritedTypeName6093Test,TestTypeNames,TestMultipleTypeNames,AbstractTypeNamesTest,TestSubtypes,SealedTypesWithSubtypesTest,JsonTypeInfoSimpleClassName4061Test,SealedTypesWithJsonTypeInfoSimpleClassName4061Test,SealedTypesWithTypedSerializationTest,SealedTypesWithTypedDeserializationTest'
