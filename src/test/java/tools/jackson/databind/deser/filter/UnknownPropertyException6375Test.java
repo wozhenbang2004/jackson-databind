@@ -74,8 +74,10 @@ class UnknownPropertyException6375Test
         ObjectMapper unwrapped = JsonMapper.builder().addHandler(handler)
                 .disable(DeserializationFeature.WRAP_EXCEPTIONS).build();
         for (Class<?> type : new Class<?>[] { Bean.class, RecordBean.class, BuiltBean.class }) {
+            String json = (type == RecordBean.class)
+                    ? "{\"value\":1,\"unknown\":2}" : "{\"unknown\":1}";
             assertSame(failure, assertThrows(IllegalStateException.class,
-                    () -> unwrapped.readValue("{\"unknown\":1}", type)));
+                    () -> unwrapped.readValue(json, type)));
         }
     }
 
