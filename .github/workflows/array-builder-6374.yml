@@ -1,4 +1,4 @@
-name: Reproduce JsonValue map key serializer
+name: Validate JsonValue map key serializer
 on:
   push:
     branches: [validation/json-value-map-key-3119]
@@ -34,3 +34,272 @@ jobs:
           assert int(suite.attrib['errors']) == 0, suite.attrib
           print('Confirmed four accessor key serializer failures and two controls passing')
           PY
+      - name: Verify accessor key fix and contextual compatibility
+        shell: bash
+        run: |
+          git apply <<'PATCH3119'
+          diff --git a/src/main/java/tools/jackson/databind/ser/jackson/JsonValueSerializer.java b/src/main/java/tools/jackson/databind/ser/jackson/JsonValueSerializer.java
+          index c723a0de5f..aa9b6453ab 100644
+          --- a/src/main/java/tools/jackson/databind/ser/jackson/JsonValueSerializer.java
+          +++ b/src/main/java/tools/jackson/databind/ser/jackson/JsonValueSerializer.java
+          @@ -18,6 +18,7 @@ import tools.jackson.databind.jsonFormatVisitors.JsonStringFormatVisitor;
+           import tools.jackson.databind.jsontype.TypeIdResolver;
+           import tools.jackson.databind.jsontype.TypeSerializer;
+           import tools.jackson.databind.ser.BeanSerializer;
+          +import tools.jackson.databind.ser.jdk.MapSerializer;
+           import tools.jackson.databind.ser.std.StdDynamicSerializer;
+           import tools.jackson.databind.util.ClassUtil;
+           
+          @@ -175,7 +176,7 @@ public class JsonValueSerializer
+                            */
+                           // I _think_ this can be considered a primary property...
+                           ser = ctxt.findPrimaryPropertySerializer(_valueType, property);
+          -                ser = _withIgnoreProperties(ser, _ignoredProperties);
+          +                ser = _withAccessorProperties(ctxt, ser, property);
+                           /* 09-Dec-2010, tatu: Turns out we must add special handling for
+                            *   cases where "native" (aka "natural") type is being serialized,
+                            *   using standard serializer
+          @@ -190,6 +191,7 @@ public class JsonValueSerializer
+                   } else {
+                       // 05-Sep-2013, tatu: I _think_ this can be considered a primary property...
+                       ser = ctxt.handlePrimaryContextualization(ser, property);
+          +            ser = _withAccessorProperties(ctxt, ser, property);
+                       return withResolved(property, vts, ser, _forceTypeInformation);
+                   }
+                   return this;
+          @@ -243,7 +245,7 @@ public class JsonValueSerializer
+           
+               protected ValueSerializer<Object> _findSerializer(SerializationContext ctxt, Object value) {
+                   final UnaryOperator<ValueSerializer<Object>> serTransformer =
+          -                valueSer -> _withIgnoreProperties(valueSer, _ignoredProperties);
+          +                valueSer -> _withAccessorProperties(ctxt, valueSer, _property);
+                   Class<?> cc = value.getClass();
+                   if (_valueType.hasGenericTypes()) {
+                       return _findAndAddDynamic(ctxt,
+          @@ -253,6 +255,27 @@ public class JsonValueSerializer
+                   return _findAndAddDynamic(ctxt, cc, serTransformer);
+               }
+           
+          +    @SuppressWarnings("unchecked")
+          +    protected ValueSerializer<Object> _withAccessorProperties(SerializationContext ctxt,
+          +            ValueSerializer<?> ser, BeanProperty property) {
+          +        ser = _withIgnoreProperties(ser, _ignoredProperties);
+          +        if (ser instanceof MapSerializer mapSer) {
+          +            AnnotationIntrospector intr = ctxt.getAnnotationIntrospector();
+          +            AnnotatedMember member = (property == null) ? null : property.getMember();
+          +            // An enclosing property's explicit key serializer takes precedence.
+          +            if ((intr != null) && ((member == null)
+          +                    || (intr.findKeySerializer(ctxt.getConfig(), member) == null))) {
+          +                Object definition = intr.findKeySerializer(ctxt.getConfig(), _accessor);
+          +                if (definition != null) {
+          +                    ValueSerializer<?> keySer = ctxt.serializerInstance(_accessor, definition);
+          +                    keySer = ctxt.handleSecondaryContextualization(keySer, property);
+          +                    ser = mapSer.withKeySerializer(keySer);
+          +                }
+          +            }
+          +        }
+          +        return (ValueSerializer<Object>) ser;
+          +    }
+          +
+               /**
+                * Internal helper that configures the provided {@code ser} to ignore properties specified by {@link JsonIgnoreProperties}.
+                *
+          @@ -292,12 +315,7 @@ public class JsonValueSerializer
+                   }
+                   ValueSerializer<Object> ser = _valueSerializer;
+                   if (ser == null) {
+          -            Class<?> cc = value.getClass();
+          -            if (_valueType.hasGenericTypes()) {
+          -                ser = _findAndAddDynamic(ctxt, ctxt.constructSpecializedType(_valueType, cc));
+          -            } else {
+          -                ser = _findAndAddDynamic(ctxt, cc);
+          -            }
+          +            ser = _findSerializer(ctxt, value);
+                   }
+                   // [databind#6206]: simple check for direct cycle through accessor
+                   //   (if written as null, no type id, same as with actual null value above)
+          diff --git a/src/main/java/tools/jackson/databind/ser/jdk/MapSerializer.java b/src/main/java/tools/jackson/databind/ser/jdk/MapSerializer.java
+          index 9bf1e2610e..99250a9704 100644
+          --- a/src/main/java/tools/jackson/databind/ser/jdk/MapSerializer.java
+          +++ b/src/main/java/tools/jackson/databind/ser/jdk/MapSerializer.java
+          @@ -249,6 +249,17 @@ public class MapSerializer
+                   return ser;
+               }
+           
+          +    /**
+          +     * Copy with a different key serializer, retaining other contextual settings.
+          +     */
+          +    public MapSerializer withKeySerializer(ValueSerializer<?> keySerializer) {
+          +        if (_keySerializer == keySerializer) {
+          +            return this;
+          +        }
+          +        return withResolved(_property, keySerializer, _valueSerializer,
+          +                _ignoredEntries, _includedEntries, _sortKeys);
+          +    }
+          +
+               @Override
+               public MapSerializer withFilterId(Object filterId) {
+                   if (_filterId == filterId) {
+          PATCH3119
+          cat > src/test/java/tools/jackson/databind/ser/JsonValueMapKey3119Test.java <<'TEST3119'
+          package tools.jackson.databind.ser;
+          
+          import java.util.Map;
+          
+          import org.junit.jupiter.api.Test;
+          
+          import com.fasterxml.jackson.annotation.JsonValue;
+          
+          import tools.jackson.core.JsonGenerator;
+          import tools.jackson.databind.*;
+          import tools.jackson.databind.annotation.JsonSerialize;
+          import tools.jackson.databind.json.JsonMapper;
+          import tools.jackson.databind.testutil.DatabindTestUtil;
+          
+          import static org.junit.jupiter.api.Assertions.assertEquals;
+          
+          class JsonValueMapKey3119Test extends DatabindTestUtil
+          {
+              static class PrefixKeySerializer extends ValueSerializer<String> {
+                  @Override
+                  public void serialize(String value, JsonGenerator gen, SerializationContext ctxt) {
+                      gen.writeName("key-" + value);
+                  }
+              }
+          
+              static class GetterValue {
+                  @JsonValue
+                  @JsonSerialize(keyUsing = PrefixKeySerializer.class)
+                  public Map<String, Integer> value() {
+                      return Map.of("a", 1);
+                  }
+              }
+          
+              static class FieldValue {
+                  @JsonValue
+                  @JsonSerialize(keyUsing = PrefixKeySerializer.class)
+                  public Map<String, Integer> value = Map.of("a", 1);
+              }
+          
+              static class PlainValue {
+                  @JsonValue
+                  public Map<String, Integer> value() {
+                      return Map.of("a", 1);
+                  }
+              }
+          
+              abstract static class ValueMixin {
+                  @JsonSerialize(keyUsing = PrefixKeySerializer.class)
+                  abstract Map<String, Integer> value();
+              }
+          
+              static class Holder {
+                  public GetterValue wrapped = new GetterValue();
+              }
+          
+              static class OrdinaryMap {
+                  @JsonSerialize(keyUsing = PrefixKeySerializer.class)
+                  public Map<String, Integer> value = Map.of("a", 1);
+              }
+          
+              static class OuterKeySerializer extends ValueSerializer<String> {
+                  @Override
+                  public void serialize(String value, JsonGenerator gen, SerializationContext ctxt) {
+                      gen.writeName("outer-" + value);
+                  }
+              }
+          
+              static class StringValueSerializer extends ValueSerializer<Integer> {
+                  @Override
+                  public void serialize(Integer value, JsonGenerator gen, SerializationContext ctxt) {
+                      gen.writeString("value-" + value);
+                  }
+              }
+          
+              static class KeyOverrideHolder {
+                  @JsonSerialize(keyUsing = OuterKeySerializer.class)
+                  public GetterValue wrapped = new GetterValue();
+              }
+          
+              static class ContentOverrideHolder {
+                  @JsonSerialize(contentUsing = StringValueSerializer.class)
+                  public GetterValue wrapped = new GetterValue();
+              }
+          
+              private final ObjectMapper mapper = newJsonMapper();
+          
+              @Test
+              void getterKeySerializer() {
+                  assertEquals("{\"key-a\":1}", mapper.writeValueAsString(new GetterValue()));
+              }
+          
+              @Test
+              void fieldKeySerializer() {
+                  assertEquals("{\"key-a\":1}", mapper.writeValueAsString(new FieldValue()));
+              }
+          
+              @Test
+              void mixinKeySerializer() {
+                  ObjectMapper withMixin = JsonMapper.builder()
+                          .addMixIn(PlainValue.class, ValueMixin.class).build();
+                  assertEquals("{\"key-a\":1}", withMixin.writeValueAsString(new PlainValue()));
+              }
+          
+              @Test
+              void wrappedPropertyKeySerializer() {
+                  assertEquals("{\"wrapped\":{\"key-a\":1}}", mapper.writeValueAsString(new Holder()));
+              }
+          
+              @Test
+              void ordinaryMapControl() {
+                  assertEquals("{\"value\":{\"key-a\":1}}", mapper.writeValueAsString(new OrdinaryMap()));
+              }
+          
+              @Test
+              void unannotatedValueControl() {
+                  assertEquals("{\"a\":1}", mapper.writeValueAsString(new PlainValue()));
+              }
+          
+              @Test
+              void staticTypingKeySerializer() {
+                  ObjectMapper staticMapper = JsonMapper.builder()
+                          .enable(MapperFeature.USE_STATIC_TYPING).build();
+                  assertEquals("{\"key-a\":1}", staticMapper.writeValueAsString(new GetterValue()));
+              }
+          
+              @Test
+              void enclosingKeySerializerTakesPrecedence() {
+                  assertEquals("{\"wrapped\":{\"outer-a\":1}}",
+                          mapper.writeValueAsString(new KeyOverrideHolder()));
+              }
+          
+              @Test
+              void enclosingContentSerializerIsRetained() {
+                  assertEquals("{\"wrapped\":{\"key-a\":\"value-1\"}}",
+                          mapper.writeValueAsString(new ContentOverrideHolder()));
+              }
+          
+              @Test
+              void cachedSerializersKeepPropertyConfiguration() {
+                  for (int i = 0; i < 2; ++i) {
+                      assertEquals("{\"key-a\":1}", mapper.writeValueAsString(new GetterValue()));
+                      assertEquals("{\"wrapped\":{\"outer-a\":1}}",
+                              mapper.writeValueAsString(new KeyOverrideHolder()));
+                      assertEquals("{\"wrapped\":{\"key-a\":1}}", mapper.writeValueAsString(new Holder()));
+                  }
+              }
+          }
+          TEST3119
+          rm -rf target/surefire-reports
+          ./mvnw -B -ntp test '-Dtest=JsonValueMapKey3119Test,JsonValueSerializationTest,JsonValueIgnore3647Test,JsonValueCycleSer6206Test,MapSerializationTest,MapEntrySerializationTest,EnumAsMapKeySerializationTest,RecordJsonValue3063Test'
+          python3 - <<'PYCOUNT'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          suites = [ET.parse(p).getroot() for p in Path('target/surefire-reports').glob('TEST-*.xml')]
+          assert len(suites) == 8, len(suites)
+          counts = {k: sum(int(s.attrib[k]) for s in suites) for k in ('tests', 'failures', 'errors', 'skipped')}
+          print('Final focused suite:', counts)
+          assert counts['failures'] == counts['errors'] == counts['skipped'] == 0, counts
+          regression = next(s for s in suites if s.attrib['name'].endswith('.JsonValueMapKey3119Test'))
+          assert int(regression.attrib['tests']) == 10, regression.attrib
+          PYCOUNT
