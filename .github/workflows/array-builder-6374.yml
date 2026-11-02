@@ -1,4 +1,4 @@
-name: Reproduce inherited sealed type names
+name: Validate inherited sealed type names
 on:
   push:
     branches: [validation/sealed-inherited-name-6093]
@@ -34,3 +34,21 @@ jobs:
           assert int(suite.attrib['errors']) == 0, suite.attrib
           print('Confirmed inherited name mismatches; dynamic and explicit-name controls pass')
           PYTEST
+      - name: Apply lazy unnamed-type resolution and verify related behavior
+        shell: bash
+        run: |
+          python3 - <<'PYFIX'
+          from pathlib import Path
+          for name in ('TypeNameIdResolver', 'SimpleNameIdResolver'):
+              path = Path('src/main/java/tools/jackson/databind/jsontype/impl/' + name + '.java')
+              source = path.read_text()
+              before = '                if (forSer) {\n                    typeToId.put(cls.getName(), id);\n                }\n'
+              after = ('                // Resolve unnamed types lazily so inherited @JsonTypeName annotations\n'
+                       '                // are considered, just as they are for types not listed as subtypes.\n'
+                       '                if (forSer && t.hasName()) {\n'
+                       '                    typeToId.put(cls.getName(), id);\n'
+                       '                }\n')
+              assert source.count(before) == 1
+              path.write_text(source.replace(before, after))
+          PYFIX
+          ./mvnw -B -ntp test '-Dtest=SealedInheritedTypeName6093Test,TestTypeNames,TestMultipleTypeNames,AbstractTypeNamesTest,TestSubtypes,SealedTypesWithSubtypesTest,JsonTypeInfoSimpleClassName4061Test,SealedTypesWithJsonTypeInfoSimpleClassName4061Test,SealedTypesWithTypedSerializationTest,SealedTypesWithTypedDeserializationTest'
