@@ -1,0 +1,36 @@
+name: Reproduce dynamic converter caching
+on:
+  push:
+    branches: [validation/dynamic-converter-cache]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Verify regression fails on the baseline
+        shell: bash
+        run: |
+          set +e
+          ./mvnw -B -ntp test -Dtest=DynamicConverterCachingTest > baseline.log 2>&1
+          result=$?
+          set -e
+          cat baseline.log
+          test "$result" -ne 0
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse('target/surefire-reports/TEST-tools.jackson.databind.convert.DynamicConverterCachingTest.xml').getroot()
+          assert int(suite.attrib['tests']) == 4, suite.attrib
+          assert int(suite.attrib['failures']) == 3, suite.attrib
+          assert int(suite.attrib['errors']) == 0, suite.attrib
+          print('Confirmed repeated contextualization in three paths with null conversion control passing')
+          PY
