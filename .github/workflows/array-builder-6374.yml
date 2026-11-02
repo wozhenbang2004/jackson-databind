@@ -1,0 +1,59 @@
+name: Validate unknown-property exception paths
+on:
+  push:
+    branches: [validation/unknown-property-6375]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Verify regression fails on the baseline
+        shell: bash
+        run: |
+          set +e
+          ./mvnw -B -ntp test -Dtest=UnknownPropertyException6375Test > baseline.log 2>&1
+          result=$?
+          set -e
+          cat baseline.log
+          test "$result" -ne 0
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse('target/surefire-reports/TEST-tools.jackson.databind.deser.filter.UnknownPropertyException6375Test.xml').getroot()
+          assert int(suite.attrib['tests']) == 8, suite.attrib
+          assert int(suite.attrib['failures']) == 4, suite.attrib
+          assert int(suite.attrib['errors']) == 0, suite.attrib
+          print('Confirmed four regression failures and four controls passing on baseline')
+          PY
+      - name: Apply only unknown-property exception wrapping
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/main/java/tools/jackson/databind/deser/bean/BeanDeserializerBase.java')
+          text = p.read_text()
+          old = '        super.handleUnknownProperty(p, ctxt, beanOrClass, propName);'
+          new = """        try {
+                      super.handleUnknownProperty(p, ctxt, beanOrClass, propName);
+                  } catch (JacksonException e) {
+                      // Already contains the path to the unknown property.
+                      throw e;
+                  } catch (Exception e) {
+                      throw wrapAndThrow(e, (beanOrClass == null) ? handledType() : beanOrClass,
+                              propName, ctxt);
+                  }"""
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff -- src/main/java/tools/jackson/databind/deser/bean/BeanDeserializerBase.java
+      - name: Verify fixed regression and related problem-handler and exception-path tests
+        run: ./mvnw -B -ntp test '-Dtest=UnknownPropertyException6375Test,DeserializationProblemHandlerTest,ExceptionPathTest,DeserExceptionTypeTest'
