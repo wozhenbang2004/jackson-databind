@@ -1,0 +1,50 @@
+name: Validate array builder extra values
+on:
+  push:
+    branches: [validation/array-builder-6374]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Verify regression fails on the baseline
+        shell: bash
+        run: |
+          set +e
+          ./mvnw -B -ntp test -Dtest=BuilderArrayExtraValues6374Test > baseline.log 2>&1
+          result=$?
+          set -e
+          cat baseline.log
+          test "$result" -ne 0
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          p = 'target/surefire-reports/TEST-tools.jackson.databind.deser.builder.BuilderArrayExtraValues6374Test.xml'
+          suite = ET.parse(p).getroot()
+          assert int(suite.attrib['tests']) == 8, suite.attrib
+          assert int(suite.attrib['errors']) == 6, suite.attrib
+          assert int(suite.attrib['failures']) == 0, suite.attrib
+          print('Confirmed six regression errors and two strict-mode controls passing on the baseline')
+          PY
+      - name: Apply only the two skip-loop changes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/main/java/tools/jackson/databind/deser/bean/BeanAsArrayBuilderDeserializer.java')
+          text = p.read_text()
+          old = '        while (p.nextToken() != JsonToken.END_ARRAY) {\n            p.skipChildren();\n        }'
+          new = '        do {\n            p.skipChildren();\n        } while (p.nextToken() != JsonToken.END_ARRAY);'
+          assert text.count(old) == 2
+          p.write_text(text.replace(old, new))
+          PY
+          git diff --check
+          git diff -- src/main/java/tools/jackson/databind/deser/bean/BeanAsArrayBuilderDeserializer.java
+      - name: Verify fixed regression and related builder and array tests
+        run: ./mvnw -B -ntp test '-Dtest=Builder*Test,POJOAsArrayTest'
